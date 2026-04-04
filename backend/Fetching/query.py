@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 from langchain_community.vectorstores import FAISS  # type: ignore
-from langchain_community.embeddings import HuggingFaceEmbeddings  # type: ignore
+from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
 from openai import OpenAI
 import os
 

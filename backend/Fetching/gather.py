@@ -1,6 +1,6 @@
 from langchain_community.document_loaders import PyPDFLoader # type: ignore
 from langchain_text_splitters import RecursiveCharacterTextSplitter # type: ignore
-from langchain_community.embeddings import HuggingFaceEmbeddings # type: ignore
+from langchain_huggingface import HuggingFaceEmbeddings # type: ignore
 from langchain_community.vectorstores import FAISS # type: ignore
 import os
 
