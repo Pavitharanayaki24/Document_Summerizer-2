@@ -8,6 +8,9 @@ from langchain_community.document_loaders import Docx2txtLoader
 from langchain_community.document_loaders import TextLoader
 from langchain_community.document_loaders import CSVLoader
 
+_VECTOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vector_store")
+
+
 def load_document(file_path):
     ext = os.path.splitext(file_path)[1].lower()
 
@@ -40,6 +43,14 @@ def chunk_documents(documents):
     chunks = splitter.split_documents(documents)
     return chunks
 
+
+def tag_documents_with_doc_id(documents, doc_id: str, filename: str):
+    for doc in documents:
+        doc.metadata = dict(doc.metadata or {})
+        doc.metadata["doc_id"] = doc_id
+        doc.metadata["filename"] = filename
+    return documents
+
 def create_embeddings():
     embeddings = HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
@@ -47,8 +58,9 @@ def create_embeddings():
     return embeddings
 
 def store_in_vector_db(chunks, embeddings):
+    os.makedirs(_VECTOR_DIR, exist_ok=True)
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    vectorstore.save_local("vector_store")
+    vectorstore.save_local(_VECTOR_DIR)
     return vectorstore
 
 def ingest_pipeline():

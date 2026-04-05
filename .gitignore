@@ -7,6 +7,8 @@ venv/
 
 # Vector DB
 Fetching/vector_store/
+Fetching/documents_registry.json
+Fetching/upload_meta.json
 
 # Temp files
 temp.pdf

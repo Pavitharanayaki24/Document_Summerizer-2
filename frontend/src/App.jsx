@@ -1,13 +1,19 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import "./App.css";
 
 const API_BASE = "http://127.0.0.1:8000";
 const QUICK_PROMPTS = [
-  "Summarize this document in 5 bullet points.",
+  "Summarize these documents in 5 bullet points.",
   "What are the key risks or concerns mentioned?",
   "Extract action items and deadlines.",
   "What are the main conclusions?",
+];
+const COMPARE_PROMPTS = [
+  "What are the main differences between these two documents?",
+  "What topics overlap between the two?",
+  "Compare the conclusions in each document.",
+  "Which document is more detailed, and on what?",
 ];
 const SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt", ".csv"];
 
@@ -26,51 +32,122 @@ const isSupportedFile = (name) => {
 function App() {
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [uploadStatus, setUploadStatus] = useState("");
   const [uploadKind, setUploadKind] = useState("muted");
   const [loadingAsk, setLoadingAsk] = useState(false);
   const [loadingUpload, setLoadingUpload] = useState(false);
+  const [loadingClear, setLoadingClear] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [copyStatus, setCopyStatus] = useState("");
+  const [serverDocuments, setServerDocuments] = useState([]);
+  const [compareAvailable, setCompareAvailable] = useState(false);
+  const [compareMode, setCompareMode] = useState(false);
+  const [compareDocA, setCompareDocA] = useState("");
+  const [compareDocB, setCompareDocB] = useState("");
+
+  const fetchDocuments = useCallback(async () => {
+    try {
+      const response = await axios.get(`${API_BASE}/documents`);
+      setServerDocuments(response.data.documents ?? []);
+      setCompareAvailable(Boolean(response.data.compare_available));
+    } catch (error) {
+      console.error(error);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchDocuments();
+  }, [fetchDocuments]);
+
+  useEffect(() => {
+    if (!compareAvailable) {
+      setCompareMode(false);
+      setCompareDocA("");
+      setCompareDocB("");
+    }
+  }, [compareAvailable]);
+
+  const addFilesFromList = (fileList) => {
+    const next = Array.from(fileList || []).filter((f) => isSupportedFile(f.name));
+    const bad = Array.from(fileList || []).filter((f) => !isSupportedFile(f.name));
+    if (bad.length) {
+      setUploadKind("error");
+      setUploadStatus("Some files were skipped (use PDF, DOCX, TXT, or CSV).");
+    } else {
+      setUploadStatus("");
+      setUploadKind("muted");
+    }
+    if (next.length) {
+      setFiles((prev) => [...prev, ...next]);
+    }
+  };
 
   const askQuestion = async () => {
     const q = question.trim();
     if (!q || loadingAsk) return;
 
+    const useCompare = compareMode && compareAvailable && serverDocuments.length >= 2;
+    if (useCompare) {
+      if (!compareDocA || !compareDocB) {
+        setAnswer("Select Document A and Document B to compare.");
+        return;
+      }
+      if (compareDocA === compareDocB) {
+        setAnswer("Choose two different documents.");
+        return;
+      }
+    }
+
     setLoadingAsk(true);
     try {
-      const response = await axios.post(`${API_BASE}/ask`, {
-        question: q,
-      });
+      const payload = { question: q, mode: useCompare ? "compare" : "default" };
+      if (useCompare) {
+        payload.compare = { doc_id_a: compareDocA, doc_id_b: compareDocB };
+      }
+      const response = await axios.post(`${API_BASE}/ask`, payload);
       setAnswer(response.data.answer ?? "");
     } catch (error) {
       console.error("Error:", error);
-      setAnswer("Something went wrong. Check that the API is running and try again.");
+      const msg = error.response?.data?.error;
+      setAnswer(
+        msg
+          ? String(msg)
+          : "Something went wrong. Check that the API is running and try again.",
+      );
     } finally {
       setLoadingAsk(false);
     }
   };
 
   const uploadFile = async () => {
-    if (!file) {
+    if (!files.length) {
       setUploadKind("error");
-      setUploadStatus("Choose a file to upload first.");
+      setUploadStatus("Choose one or more files first.");
       return;
     }
 
     const formData = new FormData();
-    formData.append("file", file);
+    // `file`: legacy servers that only check request.files["file"]
+    // `files`: multi-file for current backend
+    formData.append("file", files[0]);
+    files.forEach((f) => formData.append("files", f));
 
     setLoadingUpload(true);
     setUploadKind("muted");
     setUploadStatus("Uploading…");
     try {
-      // Let axios set Content-Type with the multipart boundary — a bare
-      // "multipart/form-data" header breaks parsing and the server sees no file.
-      await axios.post(`${API_BASE}/upload`, formData);
+      const response = await axios.post(`${API_BASE}/upload`, formData);
+      const multi = Boolean(response.data?.compare_available);
+      setCompareAvailable(multi);
+      setUploadStatus(
+        multi
+          ? "Indexed. Ask questions or use Compare to contrast two documents."
+          : "Indexed. Ask questions about your document.",
+      );
       setUploadKind("success");
-      setUploadStatus("Document uploaded. You can ask questions about it.");
+      setFiles([]);
+      await fetchDocuments();
     } catch (error) {
       console.error(error);
       setUploadKind("error");
@@ -85,25 +162,43 @@ function App() {
     }
   };
 
-  const onSelectFile = (nextFile) => {
-    if (!nextFile) return;
-    if (!isSupportedFile(nextFile.name)) {
+  const clearAllDocuments = async () => {
+    if (!serverDocuments.length) {
       setUploadKind("error");
-      setUploadStatus("Unsupported file type. Use PDF, DOCX, TXT, or CSV.");
+      setUploadStatus("Nothing to clear.");
       return;
     }
-    setFile(nextFile);
-    setUploadStatus("");
-    setUploadKind("muted");
+    if (!window.confirm("Remove all indexed documents?")) {
+      return;
+    }
+    setLoadingClear(true);
+    try {
+      await axios.post(`${API_BASE}/clear`);
+      setServerDocuments([]);
+      setCompareAvailable(false);
+      setUploadStatus("Cleared. Upload new files when ready.");
+      setUploadKind("success");
+    } catch (error) {
+      console.error(error);
+      setUploadKind("error");
+      setUploadStatus("Could not clear. Check the server.");
+    } finally {
+      setLoadingClear(false);
+    }
   };
 
   const onFileChange = (e) => {
-    onSelectFile(e.target.files?.[0]);
+    addFilesFromList(e.target.files);
+    e.target.value = "";
   };
 
-  const removeSelectedFile = () => {
-    setFile(null);
-    setUploadStatus("File removed. Select another file to continue.");
+  const removeFileAt = (index) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const clearSelectedFiles = () => {
+    setFiles([]);
+    setUploadStatus("");
     setUploadKind("muted");
   };
 
@@ -117,7 +212,7 @@ function App() {
   const onDropFile = (e) => {
     e.preventDefault();
     setDragActive(false);
-    onSelectFile(e.dataTransfer.files?.[0]);
+    addFilesFromList(e.dataTransfer.files);
   };
 
   const copyAnswer = async () => {
@@ -141,6 +236,8 @@ function App() {
         : "status status--muted";
 
   const askDisabled = loadingAsk || !question.trim();
+  const compareReady = compareAvailable && serverDocuments.length >= 2;
+  const quickPrompts = compareMode && compareReady ? COMPARE_PROMPTS : QUICK_PROMPTS;
 
   return (
     <div className="app">
@@ -173,20 +270,21 @@ function App() {
             <span className="shell__title-text">Document Summarizer</span>
           </h1>
           <p className="shell__lead">
-            Upload PDF, Word, CSV, or text files, then ask anything about their contents.
+            Upload one or more PDF, Word, CSV, or text files in one batch, then ask questions. Upload
+            two or more files at once to enable compare.
           </p>
           <div className="shell__tags">
             <span className="shell__tag">
               <span className="shell__tag-dot" aria-hidden />
-              Fast answers
+              Multi-file upload
             </span>
             <span className="shell__tag">
               <span className="shell__tag-dot shell__tag-dot--mint" aria-hidden />
-              Simple workflow
+              Summaries &amp; Q&amp;A
             </span>
             <span className="shell__tag">
               <span className="shell__tag-dot shell__tag-dot--amber" aria-hidden />
-              File-aware chat
+              Compare two docs
             </span>
           </div>
         </header>
@@ -198,7 +296,7 @@ function App() {
               <span className="panel__step" aria-hidden>
                 1
               </span>
-              Add your document
+              Add your documents
             </h2>
             <div className="dropzone">
               <div
@@ -216,6 +314,7 @@ function App() {
                     className="file-input"
                     type="file"
                     accept=".pdf,.docx,.txt,.csv"
+                    multiple
                     onChange={onFileChange}
                   />
                   <label className="file-trigger" htmlFor="file-input">
@@ -234,7 +333,7 @@ function App() {
                     type="button"
                     className="btn btn--success"
                     onClick={uploadFile}
-                    disabled={loadingUpload || !file}
+                    disabled={loadingUpload || !files.length}
                   >
                     {loadingUpload ? (
                       <>
@@ -248,38 +347,75 @@ function App() {
                   </button>
                 </div>
                 <p className="dropzone__hint">
-                  Drag and drop your file here, or browse manually.
+                  Each upload replaces the previous index. Select multiple files in one go to compare
+                  them.
                 </p>
                 <p className="dropzone__hint">Supported: PDF, DOCX, TXT, CSV</p>
-                {file && (
-                  <div className="file-meta" title={file.name}>
-                    <span className="file-chip">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
-                        <path
-                          d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                        <path
-                          d="M14 2v6h6M16 13H8M16 17H8M10 9H8"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                      <span className="file-chip__name">{file.name}</span>
-                    </span>
-                    <span className="file-meta__size">{formatFileSize(file.size)}</span>
-                    <button type="button" className="text-btn" onClick={removeSelectedFile}>
-                      Remove
-                    </button>
-                  </div>
+                {files.length > 0 && (
+                  <ul className="file-list" aria-label="Files ready to upload">
+                    {files.map((file, index) => (
+                      <li key={`${file.name}-${file.size}-${index}`} className="file-list__item">
+                        <span className="file-chip">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+                            <path
+                              d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                            <path
+                              d="M14 2v6h6M16 13H8M16 17H8M10 9H8"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                          <span className="file-chip__name">{file.name}</span>
+                        </span>
+                        <span className="file-meta__size">{formatFileSize(file.size)}</span>
+                        <button type="button" className="text-btn" onClick={() => removeFileAt(index)}>
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {files.length > 0 && (
+                  <button type="button" className="text-btn file-list__clear" onClick={clearSelectedFiles}>
+                    Clear selection
+                  </button>
                 )}
               </div>
               <p className={statusClass}>{uploadStatus}</p>
+            </div>
+
+            <div className="server-docs">
+              <div className="server-docs__head">
+                <p className="server-docs__title">Indexed ({serverDocuments.length})</p>
+                <button
+                  type="button"
+                  className="text-btn"
+                  onClick={clearAllDocuments}
+                  disabled={loadingClear || serverDocuments.length === 0}
+                >
+                  {loadingClear ? "Clearing…" : "Clear all"}
+                </button>
+              </div>
+              {serverDocuments.length === 0 ? (
+                <p className="server-docs__empty">No documents yet.</p>
+              ) : (
+                <ul className="server-docs__list" aria-label="Indexed documents">
+                  {serverDocuments.map((d) => (
+                    <li key={d.doc_id} className="server-docs__item">
+                      <span className="server-docs__name" title={d.doc_id}>
+                        {d.filename}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </section>
 
@@ -288,13 +424,77 @@ function App() {
               <span className="panel__step" aria-hidden>
                 2
               </span>
-              Ask a question
+              {compareReady ? "Ask or compare" : "Ask a question"}
             </h2>
+
+            {compareReady ? (
+              <div className="compare-bar">
+                <label className="compare-bar__toggle">
+                  <input
+                    type="checkbox"
+                    checked={compareMode}
+                    onChange={(e) => {
+                      setCompareMode(e.target.checked);
+                      setQuestion("");
+                    }}
+                  />
+                  <span>Compare two documents</span>
+                </label>
+              </div>
+            ) : (
+              serverDocuments.length === 1 && (
+                <p className="compare-bar__hint compare-bar__hint--solo">
+                  Upload <strong>two or more files in one batch</strong> to enable side-by-side compare.
+                </p>
+              )
+            )}
+
+            {compareMode && compareReady && (
+              <div className="compare-picks">
+                <label className="compare-picks__field">
+                  <span className="compare-picks__label">Document A</span>
+                  <select
+                    className="input-select"
+                    value={compareDocA}
+                    onChange={(e) => setCompareDocA(e.target.value)}
+                    aria-label="First document"
+                  >
+                    <option value="">Select…</option>
+                    {serverDocuments.map((d) => (
+                      <option key={d.doc_id} value={d.doc_id}>
+                        {d.filename}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="compare-picks__field">
+                  <span className="compare-picks__label">Document B</span>
+                  <select
+                    className="input-select"
+                    value={compareDocB}
+                    onChange={(e) => setCompareDocB(e.target.value)}
+                    aria-label="Second document"
+                  >
+                    <option value="">Select…</option>
+                    {serverDocuments.map((d) => (
+                      <option key={d.doc_id} value={d.doc_id}>
+                        {d.filename}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
+
             <div className="ask-row">
               <input
                 className="input-ask"
                 type="text"
-                placeholder="e.g. What are the main conclusions?"
+                placeholder={
+                  compareMode && compareReady
+                    ? "e.g. What are the main differences?"
+                    : "e.g. Summarize the main points."
+                }
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
                 onKeyDown={onQuestionKeyDown}
@@ -305,20 +505,23 @@ function App() {
                 type="button"
                 className="btn btn--primary"
                 onClick={askQuestion}
-                disabled={askDisabled}
+                disabled={
+                  askDisabled ||
+                  (compareMode && compareReady && (!compareDocA || !compareDocB))
+                }
               >
                 {loadingAsk ? "Asking…" : "Ask"}
               </button>
             </div>
             <p className="prompt-grid__label" id="quick-prompts-label">
-              Example questions — click one to put it in the box, then press Ask.
+              Example prompts — click one, then Ask.
             </p>
             <div
               className="prompt-grid"
               role="group"
               aria-labelledby="quick-prompts-label"
             >
-              {QUICK_PROMPTS.map((prompt) => (
+              {quickPrompts.map((prompt) => (
                 <button
                   key={prompt}
                   type="button"
